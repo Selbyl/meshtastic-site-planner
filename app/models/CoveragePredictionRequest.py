@@ -103,5 +103,8 @@ class CoveragePredictionRequest(BaseModel):
 
     high_resolution: bool = Field(
         False,
-        description="Use optional 1-arcsecond / 30 meter resolution  terrain tiles instead of the default 3-arcsecond / 90 meter (default: False).",
+        description=(
+            "Use optional 1m / 1-arcsecond terrain data when available. "
+            "If unavailable, the system falls back to 10m / 1-arcsecond terrain data."
+        ),
     )

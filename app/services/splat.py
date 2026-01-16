@@ -1,12 +1,13 @@
 import gzip
+import io
 import logging
 import math
 import os
-import io
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
-from typing import Literal, List, Tuple
+from typing import List, Literal, Tuple
+
 from rasterio.transform import Affine
 
 import boto3
@@ -117,7 +118,9 @@ class Splat:
         self.bucket_prefix = bucket_prefix
 
         logger.info(
-            f"Initialized SPLAT! with terrain tile cache at '{cache_dir}' with a size limit of {cache_size_gb} GB."
+            "Initialized SPLAT! with terrain tile cache at '%s' with a size limit of %s GB.",
+            cache_dir,
+            cache_size_gb,
         )
 
     def coverage_prediction(self, request: CoveragePredictionRequest) -> bytes:
@@ -139,8 +142,7 @@ class Splat:
             try:
                 logger.debug(f"Temporary directory created: {tmpdir}")
 
-                # FIXME: Eventually support high-resolution terrain data
-                request.high_resolution = False
+                # Allow high-resolution terrain data when requested
 
                 # Set hard limit of 100 km radius
                 if request.radius > 100000:
