@@ -10,17 +10,20 @@ Endpoints:
     - /result/{task_id}: Retrieves the result (GeoTIFF file) of a given prediction task.
 """
 
-import redis
-from fastapi import FastAPI, BackgroundTasks
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from uuid import uuid4
-from app.services.splat import Splat
-from app.models.CoveragePredictionRequest import CoveragePredictionRequest
-import logging
 import io
-# import os
+import logging
+import os
+from uuid import uuid4
+
+import redis
+from fastapi import BackgroundTasks, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from app.models.CoveragePredictionRequest import CoveragePredictionRequest
+from app.services.splat import Splat
+from app.services.terrain_engine import TerrainEngine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,8 +31,19 @@ logger = logging.getLogger(__name__)
 # Initialize Redis client for binary data
 redis_client = redis.StrictRedis(host="redis", port=6379, decode_responses=False)
 
-# Initialize SPLAT service
-splat_service = Splat(splat_path="/app/splat")
+propagation_engine = os.getenv("PROPAGATION_ENGINE", "splat").lower()
+
+# Initialize propagation service
+if propagation_engine == "terrain":
+    splat_service = TerrainEngine(
+        dem_1m_path=os.getenv("DEM_1M_PATH"),
+        dem_10m_path=os.getenv("DEM_10M_PATH"),
+        max_pixels=int(os.getenv("DEM_MAX_PIXELS", "2048")),
+        azimuth_step=int(os.getenv("AZIMUTH_STEP", "1")),
+        blocked_loss_db=float(os.getenv("BLOCKED_LOSS_DB", "20")),
+    )
+else:
+    splat_service = Splat(splat_path="/app/splat")
 
 # Initialize FastAPI app
 app = FastAPI()
