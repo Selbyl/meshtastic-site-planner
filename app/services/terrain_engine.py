@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
 from joblib import Parallel, delayed
+from PIL import Image
 from rasterio.transform import from_bounds
 from rasterio.warp import reproject, Resampling
 
@@ -80,6 +81,25 @@ class TerrainEngine:
         )
 
         return self._create_geotiff(signal_dbm, transform, request)
+
+    def coverage_prediction_with_kmz(self, request: CoveragePredictionRequest) -> Tuple[bytes, bytes]:
+        dem = self._select_dem(request)
+        dem_data, transform = self._read_dem_window(dem, request)
+
+        if dem_data.size == 0:
+            raise RuntimeError("DEM window is empty for the requested area.")
+
+        tx_elevation = self._sample_tx_elevation(dem_data, transform, request.lat, request.lon)
+        signal_dbm = self._compute_signal_strength(
+            dem_data,
+            transform,
+            request,
+            tx_elevation,
+        )
+
+        geotiff_data = self._create_geotiff(signal_dbm, transform, request)
+        kmz_data = self._create_kmz(signal_dbm, transform, request)
+        return geotiff_data, kmz_data
 
     def _load_dem(self, name: str, path: str) -> DemSource:
         if not os.path.exists(path):
@@ -309,6 +329,63 @@ class TerrainEngine:
 
             buffer.seek(0)
             return buffer.read()
+
+    def _create_kmz(
+        self,
+        signal_dbm: np.ndarray,
+        transform: rasterio.Affine,
+        request: CoveragePredictionRequest,
+    ) -> bytes:
+        import zipfile
+
+        min_dbm = request.min_dbm
+        max_dbm = request.max_dbm
+        nodata_value = 255
+
+        normalized = (signal_dbm - min_dbm) / (max_dbm - min_dbm)
+        normalized = np.clip(normalized, 0, 1)
+        raster = (normalized * 254).round().astype(np.uint8)
+        raster = np.where(signal_dbm < request.signal_threshold, nodata_value, raster)
+
+        cmap = plt.get_cmap(request.colormap)
+        cmap_norm = plt.Normalize(vmin=min_dbm, vmax=max_dbm)
+        rgba = (cmap(cmap_norm(signal_dbm)) * 255).astype(np.uint8)
+        rgba[raster == nodata_value, 3] = 0
+
+        overlay = Image.fromarray(rgba, mode="RGBA")
+        with io.BytesIO() as overlay_buffer:
+            overlay.save(overlay_buffer, format="PNG")
+            overlay_bytes = overlay_buffer.getvalue()
+
+        west, south = transform * (0, raster.shape[0])
+        east, north = transform * (raster.shape[1], 0)
+
+        kml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Meshtastic Coverage</name>
+    <GroundOverlay>
+      <name>Coverage</name>
+      <Icon>
+        <href>files/overlay.png</href>
+      </Icon>
+      <LatLonBox>
+        <north>{north}</north>
+        <south>{south}</south>
+        <east>{east}</east>
+        <west>{west}</west>
+      </LatLonBox>
+    </GroundOverlay>
+  </Document>
+</kml>
+"""
+
+        with io.BytesIO() as kmz_buffer:
+            with zipfile.ZipFile(kmz_buffer, "w", zipfile.ZIP_DEFLATED) as kmz:
+                kmz.writestr("doc.kml", kml)
+                kmz.writestr("files/overlay.png", overlay_bytes)
+            kmz_buffer.seek(0)
+            return kmz_buffer.read()
 
     def _detect_cuda(self) -> bool:
         return importlib.util.find_spec("cupy") is not None

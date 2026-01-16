@@ -16,7 +16,7 @@ import os
 from uuid import uuid4
 
 import redis
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import BackgroundTasks, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -75,7 +75,11 @@ def run_splat(task_id: str, request: CoveragePredictionRequest):
     """
     try:
         logger.info(f"Starting SPLAT! coverage prediction for task {task_id}.")
-        geotiff_data = splat_service.coverage_prediction(request)
+        if hasattr(splat_service, "coverage_prediction_with_kmz"):
+            geotiff_data, kmz_data = splat_service.coverage_prediction_with_kmz(request)
+            redis_client.setex(f"{task_id}:kmz", 3600, kmz_data)
+        else:
+            geotiff_data = splat_service.coverage_prediction(request)
 
         # Log before storing in Redis
         logger.info(f"Storing result in Redis for task {task_id}")
@@ -133,12 +137,12 @@ async def get_status(task_id: str):
     return JSONResponse({"task_id": task_id, "status": status.decode("utf-8")})
 
 @app.get("/result/{task_id}")
-async def get_result(task_id: str):
+async def get_result(task_id: str, format: str = Query("tif", pattern="^(tif|kmz)$")):
     """
-    Retrieve SPLAT! task status or GeoTIFF result.
+    Retrieve SPLAT! task status or GeoTIFF/KMZ result.
 
     - Checks the task status in Redis.
-    - If "completed," retrieves the GeoTIFF data and serves it as a downloadable file.
+    - If "completed," retrieves the GeoTIFF (default) or KMZ when format=kmz.
     - If "failed," returns the error message stored in Redis.
     - If "processing", indicate the same in the response.
 
@@ -156,6 +160,18 @@ async def get_result(task_id: str):
 
     status = status.decode("utf-8")
     if status == "completed":
+        if format == "kmz":
+            kmz_data = redis_client.get(f"{task_id}:kmz")
+            if not kmz_data:
+                logger.error(f"No KMZ data found for completed task {task_id}.")
+                return JSONResponse({"error": "No KMZ result found"}, status_code=500)
+            kmz_file = io.BytesIO(kmz_data)
+            return StreamingResponse(
+                kmz_file,
+                media_type="application/vnd.google-earth.kmz",
+                headers={"Content-Disposition": f"attachment; filename={task_id}.kmz"},
+            )
+
         geotiff_data = redis_client.get(task_id)
         if not geotiff_data:
             logger.error(f"No data found for completed task {task_id}.")
@@ -165,7 +181,7 @@ async def get_result(task_id: str):
         return StreamingResponse(
             geotiff_file,
             media_type="image/tiff",
-            headers={"Content-Disposition": f"attachment; filename={task_id}.tif"}
+            headers={"Content-Disposition": f"attachment; filename={task_id}.tif"},
         )
     elif status == "failed":
         error = redis_client.get(f"{task_id}:error")

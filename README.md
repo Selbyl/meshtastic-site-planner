@@ -31,6 +31,12 @@ PROPAGATION_WORKERS=8
 
 The terrain engine prefers the 1m dataset when `high_resolution` is enabled, falling back to the 10m dataset when the 1m dataset does not cover the requested area. In SPLAT! mode, the app continues to stream terrain tiles from AWS Open Data.
 
+To export coverage for TAK, request the KMZ output from the result endpoint:
+
+```
+/result/<task_id>?format=kmz
+```
+
 
 ## Usage
 
