@@ -1,12 +1,14 @@
 import gzip
+import io
 import logging
 import math
 import os
-import io
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
-from typing import Literal, List, Tuple
+import zipfile
+from typing import List, Literal, Tuple
+
 from rasterio.transform import Affine
 
 import boto3
@@ -117,7 +119,9 @@ class Splat:
         self.bucket_prefix = bucket_prefix
 
         logger.info(
-            f"Initialized SPLAT! with terrain tile cache at '{cache_dir}' with a size limit of {cache_size_gb} GB."
+            "Initialized SPLAT! with terrain tile cache at '%s' with a size limit of %s GB.",
+            cache_dir,
+            cache_size_gb,
         )
 
     def coverage_prediction(self, request: CoveragePredictionRequest) -> bytes:
@@ -139,8 +143,7 @@ class Splat:
             try:
                 logger.debug(f"Temporary directory created: {tmpdir}")
 
-                # FIXME: Eventually support high-resolution terrain data
-                request.high_resolution = False
+                # Allow high-resolution terrain data when requested
 
                 # Set hard limit of 100 km radius
                 if request.radius > 100000:
@@ -243,6 +246,142 @@ class Splat:
 
                 logger.info("SPLAT! coverage prediction completed successfully.")
                 return geotiff_data
+
+            except Exception as e:
+                logger.error(f"Error during coverage prediction: {e}")
+                raise RuntimeError(f"Error during coverage prediction: {e}")
+
+    def coverage_prediction_with_kmz(self, request: CoveragePredictionRequest) -> Tuple[bytes, bytes]:
+        """
+        Execute a SPLAT! coverage prediction and return both GeoTIFF and KMZ outputs.
+
+        Returns:
+            Tuple[bytes, bytes]: GeoTIFF bytes and KMZ bytes.
+        """
+        logger.debug(f"Coverage prediction (KMZ) request: {request.json()}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                logger.debug(f"Temporary directory created: {tmpdir}")
+
+                # Set hard limit of 100 km radius
+                if request.radius > 100000:
+                    logger.debug(f"User tried to set radius of {request.radius} meters, setting to 100 km.")
+                    request.radius = 100000
+
+                required_tiles = Splat._calculate_required_terrain_tiles(request.lat, request.lon, request.radius)
+
+                for tile_name, sdf_name, sdf_hd_name in required_tiles:
+                    tile_data = self._download_terrain_tile(tile_name)
+                    sdf_data = self._convert_hgt_to_sdf(tile_data, tile_name, high_resolution=request.high_resolution)
+
+                    with open(
+                        os.path.join(tmpdir, sdf_hd_name if request.high_resolution else sdf_name),
+                        "wb",
+                    ) as sdf_file:
+                        sdf_file.write(sdf_data)
+
+                with open(os.path.join(tmpdir, "tx.qth"), "wb") as qth_file:
+                    qth_file.write(Splat._create_splat_qth("tx", request.lat, request.lon, request.tx_height))
+
+                with open(os.path.join(tmpdir, "splat.lrp"), "wb") as lrp_file:
+                    lrp_file.write(
+                        Splat._create_splat_lrp(
+                            ground_dielectric=request.ground_dielectric,
+                            ground_conductivity=request.ground_conductivity,
+                            atmosphere_bending=request.atmosphere_bending,
+                            frequency_mhz=request.frequency_mhz,
+                            radio_climate=request.radio_climate,
+                            polarization=request.polarization,
+                            situation_fraction=request.situation_fraction,
+                            time_fraction=request.time_fraction,
+                            tx_power=request.tx_power,
+                            tx_gain=request.tx_gain,
+                            system_loss=request.system_loss,
+                        )
+                    )
+
+                with open(os.path.join(tmpdir, "splat.dcf"), "wb") as dcf_file:
+                    dcf_file.write(
+                        Splat._create_splat_dcf(
+                            colormap_name=request.colormap,
+                            min_dbm=request.min_dbm,
+                            max_dbm=request.max_dbm,
+                        )
+                    )
+
+                logger.debug(f"Contents of {tmpdir}: {os.listdir(tmpdir)}")
+
+                splat_command = [
+                    (
+                        self.splat_hd_binary
+                        if request.high_resolution
+                        else self.splat_binary
+                    ),
+                    "-t",
+                    "tx.qth",
+                    "-L",
+                    str(request.rx_height),
+                    "-metric",
+                    "-R",
+                    str(request.radius / 1000.0),
+                    "-sc",
+                    "-gc",
+                    str(request.clutter_height),
+                    "-ngs",
+                    "-N",
+                    "-o",
+                    "output.ppm",
+                    "-dbm",
+                    "-db",
+                    str(request.signal_threshold),
+                    "-kml",
+                    "-olditm",
+                ]
+                logger.debug(f"Executing SPLAT! command: {' '.join(splat_command)}")
+
+                splat_result = subprocess.run(
+                    splat_command,
+                    cwd=tmpdir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+                logger.debug(f"SPLAT! stdout:\n{splat_result.stdout}")
+                logger.debug(f"SPLAT! stderr:\n{splat_result.stderr}")
+
+                if splat_result.returncode != 0:
+                    logger.error(
+                        f"SPLAT! execution failed with return code {splat_result.returncode}"
+                    )
+                    raise RuntimeError(
+                        f"SPLAT! execution failed with return code {splat_result.returncode}\n"
+                        f"Stdout: {splat_result.stdout}\nStderr: {splat_result.stderr}"
+                    )
+
+                with open(os.path.join(tmpdir, "output.ppm"), "rb") as ppm_file:
+                    with open(os.path.join(tmpdir, "output.kml"), "rb") as kml_file:
+                        ppm_data = ppm_file.read()
+                        kml_data = kml_file.read()
+                        geotiff_data = Splat._create_splat_geotiff(
+                            ppm_data,
+                            kml_data,
+                            request.colormap,
+                            request.min_dbm,
+                            request.max_dbm,
+                        )
+
+                kmz_data = Splat._create_kmz(
+                    kml_bytes=kml_data,
+                    ppm_bytes=ppm_data,
+                    colormap_name=request.colormap,
+                    min_dbm=request.min_dbm,
+                    max_dbm=request.max_dbm,
+                )
+
+                logger.info("SPLAT! coverage prediction completed successfully (KMZ).")
+                return geotiff_data, kmz_data
 
             except Exception as e:
                 logger.error(f"Error during coverage prediction: {e}")
@@ -598,6 +737,70 @@ class Splat:
         except Exception as e:
             logger.error(f"Error during GeoTIFF generation: {e}")
             raise RuntimeError(f"Error during GeoTIFF generation: {e}")
+
+    @staticmethod
+    def _create_kmz(
+        kml_bytes: bytes,
+        ppm_bytes: bytes,
+        colormap_name: str,
+        min_dbm: float,
+        max_dbm: float,
+        null_value: int = 255,
+    ) -> bytes:
+        """
+        Create a KMZ archive containing a KML document and a colorized PNG overlay.
+
+        Returns:
+            bytes: KMZ archive bytes.
+        """
+        tree = ET.ElementTree(ET.fromstring(kml_bytes))
+        namespace = {"kml": "http://earth.google.com/kml/2.1"}
+        box = tree.find(".//kml:LatLonBox", namespace)
+
+        north = float(box.find("kml:north", namespace).text)
+        south = float(box.find("kml:south", namespace).text)
+        east = float(box.find("kml:east", namespace).text)
+        west = float(box.find("kml:west", namespace).text)
+
+        with Image.open(io.BytesIO(ppm_bytes)) as img:
+            img_array = np.array(img.convert("L"))
+
+        cmap = plt.get_cmap(colormap_name)
+        cmap_norm = plt.Normalize(vmin=min_dbm, vmax=max_dbm)
+        rgba = (cmap(cmap_norm(img_array)) * 255).astype(np.uint8)
+        rgba[img_array == null_value, 3] = 0
+
+        overlay = Image.fromarray(rgba, mode="RGBA")
+        with io.BytesIO() as overlay_buffer:
+            overlay.save(overlay_buffer, format="PNG")
+            overlay_bytes = overlay_buffer.getvalue()
+
+        kml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Meshtastic Coverage</name>
+    <GroundOverlay>
+      <name>Coverage</name>
+      <Icon>
+        <href>files/overlay.png</href>
+      </Icon>
+      <LatLonBox>
+        <north>{north}</north>
+        <south>{south}</south>
+        <east>{east}</east>
+        <west>{west}</west>
+      </LatLonBox>
+    </GroundOverlay>
+  </Document>
+</kml>
+"""
+
+        with io.BytesIO() as kmz_buffer:
+            with zipfile.ZipFile(kmz_buffer, "w", zipfile.ZIP_DEFLATED) as kmz:
+                kmz.writestr("doc.kml", kml)
+                kmz.writestr("files/overlay.png", overlay_bytes)
+            kmz_buffer.seek(0)
+            return kmz_buffer.read()
 
     def _download_terrain_tile(self, tile_name: str) -> bytes:
         """

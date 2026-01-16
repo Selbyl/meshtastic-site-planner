@@ -10,17 +10,20 @@ Endpoints:
     - /result/{task_id}: Retrieves the result (GeoTIFF file) of a given prediction task.
 """
 
-import redis
-from fastapi import FastAPI, BackgroundTasks
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from uuid import uuid4
-from app.services.splat import Splat
-from app.models.CoveragePredictionRequest import CoveragePredictionRequest
-import logging
 import io
-# import os
+import logging
+import os
+from uuid import uuid4
+
+import redis
+from fastapi import BackgroundTasks, FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from app.models.CoveragePredictionRequest import CoveragePredictionRequest
+from app.services.splat import Splat
+from app.services.terrain_engine import TerrainEngine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,8 +31,19 @@ logger = logging.getLogger(__name__)
 # Initialize Redis client for binary data
 redis_client = redis.StrictRedis(host="redis", port=6379, decode_responses=False)
 
-# Initialize SPLAT service
-splat_service = Splat(splat_path="/app/splat")
+propagation_engine = os.getenv("PROPAGATION_ENGINE", "splat").lower()
+
+# Initialize propagation service
+if propagation_engine == "terrain":
+    splat_service = TerrainEngine(
+        dem_1m_path=os.getenv("DEM_1M_PATH"),
+        dem_10m_path=os.getenv("DEM_10M_PATH"),
+        max_pixels=int(os.getenv("DEM_MAX_PIXELS", "2048")),
+        azimuth_step=int(os.getenv("AZIMUTH_STEP", "1")),
+        blocked_loss_db=float(os.getenv("BLOCKED_LOSS_DB", "20")),
+    )
+else:
+    splat_service = Splat(splat_path="/app/splat")
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -61,7 +75,11 @@ def run_splat(task_id: str, request: CoveragePredictionRequest):
     """
     try:
         logger.info(f"Starting SPLAT! coverage prediction for task {task_id}.")
-        geotiff_data = splat_service.coverage_prediction(request)
+        if hasattr(splat_service, "coverage_prediction_with_kmz"):
+            geotiff_data, kmz_data = splat_service.coverage_prediction_with_kmz(request)
+            redis_client.setex(f"{task_id}:kmz", 3600, kmz_data)
+        else:
+            geotiff_data = splat_service.coverage_prediction(request)
 
         # Log before storing in Redis
         logger.info(f"Storing result in Redis for task {task_id}")
@@ -119,12 +137,12 @@ async def get_status(task_id: str):
     return JSONResponse({"task_id": task_id, "status": status.decode("utf-8")})
 
 @app.get("/result/{task_id}")
-async def get_result(task_id: str):
+async def get_result(task_id: str, format: str = Query("tif", pattern="^(tif|kmz)$")):
     """
-    Retrieve SPLAT! task status or GeoTIFF result.
+    Retrieve SPLAT! task status or GeoTIFF/KMZ result.
 
     - Checks the task status in Redis.
-    - If "completed," retrieves the GeoTIFF data and serves it as a downloadable file.
+    - If "completed," retrieves the GeoTIFF (default) or KMZ when format=kmz.
     - If "failed," returns the error message stored in Redis.
     - If "processing", indicate the same in the response.
 
@@ -142,6 +160,18 @@ async def get_result(task_id: str):
 
     status = status.decode("utf-8")
     if status == "completed":
+        if format == "kmz":
+            kmz_data = redis_client.get(f"{task_id}:kmz")
+            if not kmz_data:
+                logger.error(f"No KMZ data found for completed task {task_id}.")
+                return JSONResponse({"error": "No KMZ result found"}, status_code=500)
+            kmz_file = io.BytesIO(kmz_data)
+            return StreamingResponse(
+                kmz_file,
+                media_type="application/vnd.google-earth.kmz",
+                headers={"Content-Disposition": f"attachment; filename={task_id}.kmz"},
+            )
+
         geotiff_data = redis_client.get(task_id)
         if not geotiff_data:
             logger.error(f"No data found for completed task {task_id}.")
@@ -151,7 +181,7 @@ async def get_result(task_id: str):
         return StreamingResponse(
             geotiff_file,
             media_type="image/tiff",
-            headers={"Content-Disposition": f"attachment; filename={task_id}.tif"}
+            headers={"Content-Disposition": f"attachment; filename={task_id}.tif"},
         )
     elif status == "failed":
         error = redis_client.get(f"{task_id}:error")
