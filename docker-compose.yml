@@ -11,6 +11,13 @@ services:
       - VIRTUAL_HOST=site.meshtastic.org
       - VIRTUAL_PORT=8080
       - LETSENCRYPT_HOST=site.meshtastic.org
+      - PROPAGATION_ENGINE=terrain
+      - DEM_1M_PATH=/data/dem/usgs_1m.tif
+      - DEM_10M_PATH=/data/dem/usgs_10m.tif
+      - DEM_MAX_PIXELS=2048
+      - AZIMUTH_STEP=1
+      - BLOCKED_LOSS_DB=20
+      - PROPAGATION_WORKERS=8
     mem_limit: 12G
     ports:
       - 8080:8080
