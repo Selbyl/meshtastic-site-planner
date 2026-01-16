@@ -6,6 +6,7 @@ ENV TERM=xterm
 # Install system dependencies first (before Python dependencies)
 RUN apt-get update && apt-get install -y \
     build-essential \
+    git \
     libbz2-dev \
     gdal-bin \
     libgdal-dev \
@@ -25,6 +26,10 @@ COPY . .
 
 # Change to SPLAT directory and set permissions
 WORKDIR /app/splat
+RUN if [ ! -f /app/splat/build ]; then \
+      git clone --depth 1 https://github.com/jmcmellen/splat.git /tmp/splat && \
+      cp -a /tmp/splat/. /app/splat; \
+    fi
 RUN chmod +x build && chmod +x configure && chmod +x install
 
 # Modify build script and configure SPLAT
