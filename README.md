@@ -12,21 +12,21 @@ The terrain elevation tiles are streamed from AWS Open Data (https://registry.op
 
 ### Local DEM + alternative propagation engine
 
-To use local GeoTIFF datasets (e.g., USGS 1 meter and USGS 1/3 arc-second / 10 meter) and a multi-core/CUDA-aware terrain engine, set the following environment variables before starting the API:
+To use local GeoTIFF datasets (e.g., USGS 1 meter and USGS 1/3 arc-second / 10 meter) and a multi-core/CUDA-aware terrain engine, set the following environment variables in `docker-compose.yml` under the `app` service:
 
 ```bash
-export PROPAGATION_ENGINE=terrain
-export DEM_1M_PATH=/data/dem/usgs_1m.tif
-export DEM_10M_PATH=/data/dem/usgs_10m.tif
+PROPAGATION_ENGINE=terrain
+DEM_1M_PATH=/data/dem/usgs_1m.tif
+DEM_10M_PATH=/data/dem/usgs_10m.tif
 ```
 
 Optional tuning values:
 
 ```bash
-export DEM_MAX_PIXELS=2048
-export AZIMUTH_STEP=1
-export BLOCKED_LOSS_DB=20
-export PROPAGATION_WORKERS=8
+DEM_MAX_PIXELS=2048
+AZIMUTH_STEP=1
+BLOCKED_LOSS_DB=20
+PROPAGATION_WORKERS=8
 ```
 
 The terrain engine prefers the 1m dataset when `high_resolution` is enabled, falling back to the 10m dataset when the 1m dataset does not cover the requested area. In SPLAT! mode, the app continues to stream terrain tiles from AWS Open Data.
