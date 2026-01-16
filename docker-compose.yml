@@ -17,8 +17,7 @@ services:
       - DEM_MAX_PIXELS=2048
       - AZIMUTH_STEP=1
       - BLOCKED_LOSS_DB=20
-      - PROPAGATION_WORKERS=8
-    mem_limit: 12G
+      - PROPAGATION_WORKERS=89
     ports:
       - 8080:8080
     depends_on:
